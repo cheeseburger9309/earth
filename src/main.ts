@@ -343,7 +343,7 @@ async function init() {
   });
 
   // =================================================================
-  // 4. SUN GLOW (3D Sphere with Volumetric Shader)
+  // 4. SUN GLOW (3D Sphere with Sun Rays)
   // =================================================================
 
   const sunGeo = createSphere(1.0, 30, 30);
@@ -384,7 +384,7 @@ async function init() {
     sunWorldPos: vec3<f32>,
     sunSize: f32,
     cameraPos: vec3<f32>,
-    _pad: f32,
+    time: f32,
   };
 
   @group(0) @binding(0) var<uniform> uniforms: Uniforms;
@@ -414,13 +414,29 @@ async function init() {
     let viewDir = normalize(uniforms.cameraPos - input.worldPos);
     let dist = length(input.localPos);  // Distance from sphere center (0 to 1)
     
+    // Calculate angle for sun rays (rotating pattern)
+    let angle = atan2(input.localPos.y, input.localPos.x);
+    let rotatingAngle = angle + uniforms.time * 0.1;  // Slow rotation
+    
+    // Create sun ray pattern (8 rays)
+    let numRays = 8.0;
+    let rayPattern = abs(sin(rotatingAngle * numRays));
+    let rays = pow(rayPattern, 3.0) * 0.3;
+    
+    // Apply rays only in outer regions
+    let rayMask = smoothstep(0.6, 1.2, dist);
+    let sunRays = rays * rayMask;
+    
     // Multiple layers of glow creating volumetric effect
     let core = exp(-dist * 3.0) * 4.0;
     let innerGlow = exp(-dist * 1.8) * 2.0;
     let middleGlow = exp(-dist * 1.0) * 1.2;
     let outerGlow = exp(-dist * 0.5) * 0.6;
     
-    let totalGlow = core + innerGlow + middleGlow + outerGlow;
+    // Extended atmospheric glow that reaches beyond the sphere
+    let extendedGlow = exp(-dist * 0.2) * 0.4;
+    
+    let totalGlow = core + innerGlow + middleGlow + outerGlow + extendedGlow + sunRays;
     
     // Warm sun color with slight variation
     let sunColor = vec3<f32>(1.0, 0.95, 0.85);
@@ -513,7 +529,7 @@ async function init() {
   }
 
   // =================================================================
-  // 7. EARTH WITH ENHANCED LIGHTING
+  // 7. EARTH (Modified to remove artificial white glow)
   // =================================================================
 
   const { positions, uvs, indices } = createSphere(1.0, 60, 60);
@@ -595,6 +611,7 @@ async function init() {
     return texture;
   }
 
+  // Modified Earth shader - removed artificial atmospheric glow
   const shaderCode = `
   struct Uniforms {
     mvp: mat4x4<f32>,
@@ -608,11 +625,7 @@ async function init() {
   @group(0) @binding(2) var textureSampler: sampler;
   @group(0) @binding(3) var cloudTexture: texture_2d<f32>;
 
-  struct VertexOutput { 
-    @builtin(position) position: vec4<f32>, 
-    @location(0) worldPos: vec3<f32>, 
-    @location(1) uv: vec2<f32> 
-  }
+  struct VertexOutput { @builtin(position) position: vec4<f32>, @location(0) worldPos: vec3<f32>, @location(1) uv: vec2<f32> }
 
   @vertex
   fn vs_main(@location(0) position: vec3<f32>, @location(1) uv: vec2<f32>) -> VertexOutput {
@@ -630,58 +643,34 @@ async function init() {
     let normal = normalize(input.worldPos);
     let sunDir = normalize(uniforms.sunDir);
     let viewDir = normalize(uniforms.cameraPos - input.worldPos);
-    
-    // Main sun lighting
     let sunDot = dot(normal, sunDir);
-    let terminatorWidth = 0.12;
+    let terminatorWidth = 0.18;
     let daylight = smoothstep(-terminatorWidth, terminatorWidth, sunDot);
     
-    // Enhanced terminator glow
-    let terminatorGlow = exp(-abs(sunDot) * 8.0) * 0.3;
-    let glowColor = vec3<f32>(1.0, 0.7, 0.4) * terminatorGlow;
-    
-    // Atmospheric scattering
+    // Reduced atmosphere glow (was causing white artifacts)
     let atmosphere = max(0.0, dot(normal, viewDir));
-    let atmosphereGlow = pow(atmosphere, 5.0) * 0.15;
+    let atmosphereGlow = pow(atmosphere, 8.0) * 0.04;  // Much more subtle
     
-    // Rim lighting (sun edge glow)
+    // Reduced rim glow 
     let rim = 1.0 - max(0.0, dot(viewDir, normal));
-    let sunAlignment = max(0.0, sunDot);
-    let rimGlow = pow(rim, 3.0) * 0.4 * sunAlignment;
+    let rimGlow = pow(rim, 6.0) * 0.08 * max(0.0, sunDot + 0.15);  // Subtler
     
-    // Night side
     let nightSide = 1.0 - daylight;
-    let cityLights = nightSide * 0.3 * (texColor.r * 0.3 + texColor.g * 0.4 + texColor.b * 0.3);
-    let visibleCityLights = cityLights * (1.0 - cloudColor.a * 0.6 * uniforms.cloudOpacity);
-    
-    // Specular highlight (ocean reflection)
+    let cityLights = nightSide * 0.25 * (texColor.r * 0.3 + texColor.g * 0.4 + texColor.b * 0.3);
+    let visibleCityLights = cityLights * (1.0 - cloudColor.a * 0.5 * uniforms.cloudOpacity);
     let halfVec = normalize(sunDir + viewDir);
-    let specular = pow(max(0.0, dot(normal, halfVec)), 120.0) * 0.4 * daylight;
-    let oceanSpecular = specular * (1.0 - cloudColor.a * 0.8 * uniforms.cloudOpacity);
-    
-    // Ambient and diffuse lighting
-    let ambient = 0.15;
-    let earthDiffuse = ambient + (1.0 - ambient) * daylight * 1.2;
-    
-    // Combine earth colors
+    let specular = pow(max(0.0, dot(normal, halfVec)), 80.0) * 0.25 * daylight * (1.0 - cloudColor.a * 0.6 * uniforms.cloudOpacity);
+    let ambient = 0.25;
+    let earthDiffuse = ambient + (1.0 - ambient) * daylight * 0.75;
     var earthColor = texColor.rgb * earthDiffuse;
     earthColor += vec3<f32>(1.0, 0.85, 0.5) * visibleCityLights;
-    earthColor += vec3<f32>(1.0, 1.0, 0.95) * oceanSpecular;
-    earthColor += glowColor;
+    earthColor += vec3<f32>(0.85, 0.9, 1.0) * specular;
+    let dynamicCloudAlpha = cloudColor.a * uniforms.cloudOpacity * 0.5;
+    var finalColor = mix(earthColor, vec3<f32>(0.92), dynamicCloudAlpha);
     
-    // Cloud shadows on day side and glow on night side
-    let cloudShadow = 1.0 - (cloudColor.a * 0.3 * daylight * uniforms.cloudOpacity);
-    earthColor *= cloudShadow;
-    
-    // Cloud lighting
-    let cloudDiffuse = ambient + (1.0 - ambient) * daylight * 0.95;
-    let dynamicCloudAlpha = cloudColor.a * uniforms.cloudOpacity * 0.6;
-    
-    var finalColor = mix(earthColor, vec3<f32>(0.95) * cloudDiffuse, dynamicCloudAlpha);
-    
-    // Atmospheric effects
-    finalColor += vec3<f32>(0.3, 0.5, 0.8) * atmosphereGlow;
-    finalColor += vec3<f32>(1.0, 0.8, 0.5) * rimGlow;
+    // Very subtle atmospheric effects (reduced intensity)
+    finalColor += vec3<f32>(0.2, 0.3, 0.5) * atmosphereGlow;
+    finalColor += vec3<f32>(0.25, 0.35, 0.6) * rimGlow;
     
     return vec4<f32>(finalColor, 1.0);
   }
@@ -849,18 +838,21 @@ async function init() {
 
     // Update Sun Uniforms
     const sunDistance = 50.0;
-    const sunSize = 3.5;  // Size of glowing sphere
+    const sunSize = 4.0;
     const sunWorldPos = [
       sunPos.x * sunDistance,
       sunPos.y * sunDistance,
       sunPos.z * sunDistance
     ];
     
+    const time = performance.now() * 0.001;  // Time for rotating sun rays
+    
     const sunUniformData = new Float32Array(24);
     sunUniformData.set(mvpMatrix, 0);
     sunUniformData.set(sunWorldPos, 16);
     sunUniformData[19] = sunSize;
     sunUniformData.set([camWorldX, camWorldY, camWorldZ], 20);
+    sunUniformData[23] = time;
     device.queue.writeBuffer(sunUniformBuffer, 0, sunUniformData);
 
     const commandEncoder = device.createCommandEncoder();
@@ -885,7 +877,7 @@ async function init() {
     renderPass.setVertexBuffer(1, starColorBuffer);
     renderPass.draw(starfield.count);
 
-    // 3. Draw Sun Glow (3D Sphere)
+    // 3. Draw Sun Glow (3D Sphere with Rays)
     renderPass.setPipeline(sunPipeline);
     renderPass.setBindGroup(0, sunBindGroup);
     renderPass.setVertexBuffer(0, sunPositionBuffer);
