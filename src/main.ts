@@ -343,7 +343,7 @@ async function init() {
   });
 
   // =================================================================
-  // 4. SUN (NEW!)
+  // 4. SUN GLOW (3D Sphere with Volumetric Shader)
   // =================================================================
 
   const sunGeo = createSphere(1.0, 30, 30);
@@ -354,12 +354,6 @@ async function init() {
   });
   device.queue.writeBuffer(sunPositionBuffer, 0, sunGeo.positions);
   
-  const sunUvBuffer = device.createBuffer({ 
-    size: sunGeo.uvs.byteLength, 
-    usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST 
-  });
-  device.queue.writeBuffer(sunUvBuffer, 0, sunGeo.uvs);
-  
   const sunIndexBuffer = device.createBuffer({ 
     size: sunGeo.indices.byteLength, 
     usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST 
@@ -367,7 +361,7 @@ async function init() {
   device.queue.writeBuffer(sunIndexBuffer, 0, sunGeo.indices);
 
   const sunUniformBuffer = device.createBuffer({ 
-    size: 96, // Increased for camera position
+    size: 96,
     usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST 
   });
 
@@ -385,124 +379,55 @@ async function init() {
   });
 
   const sunShaderCode = `
-struct Uniforms {
-  mvp: mat4x4<f32>,
-  sunWorldPos: vec3<f32>,
-  sunScale: f32,
-  cameraPos: vec3<f32>,
-  time: f32,
-};
+  struct Uniforms {
+    mvp: mat4x4<f32>,
+    sunWorldPos: vec3<f32>,
+    sunSize: f32,
+    cameraPos: vec3<f32>,
+    _pad: f32,
+  };
 
-@group(0) @binding(0) var<uniform> uniforms: Uniforms;
+  @group(0) @binding(0) var<uniform> uniforms: Uniforms;
 
-struct VertexOutput {
-  @builtin(position) position: vec4<f32>,
-  @location(0) worldPos: vec3<f32>,
-  @location(1) localPos: vec3<f32>,
-  @location(2) normal: vec3<f32>,
-};
-
-@vertex
-fn vs_main(
-  @location(0) pos: vec3<f32>,
-  @location(1) uv: vec2<f32>
-) -> VertexOutput {
-  var out: VertexOutput;
-
-  let scaled = pos * uniforms.sunScale;
-  let world = scaled + uniforms.sunWorldPos;
-
-  out.worldPos = world;
-  out.localPos = pos;
-  out.normal = normalize(pos);
-  out.position = uniforms.mvp * vec4<f32>(world, 1.0);
-
-  return out;
-}
-
-/* ---------- Noise ---------- */
-
-fn hash3(p: vec3<f32>) -> vec3<f32> {
-  return fract(sin(vec3<f32>(
-    dot(p, vec3<f32>(127.1, 311.7, 74.7)),
-    dot(p, vec3<f32>(269.5, 183.3, 246.1)),
-    dot(p, vec3<f32>(113.5, 271.9, 124.6))
-  )) * 43758.5453);
-}
-
-fn noise(p: vec3<f32>) -> f32 {
-  let i = floor(p);
-  let f = fract(p);
-  let u = f * f * (3.0 - 2.0 * f);
-
-  return mix(
-    mix(
-      mix(dot(hash3(i), f), dot(hash3(i + vec3<f32>(1,0,0)), f - vec3<f32>(1,0,0)), u.x),
-      mix(dot(hash3(i + vec3<f32>(0,1,0)), f - vec3<f32>(0,1,0)),
-          dot(hash3(i + vec3<f32>(1,1,0)), f - vec3<f32>(1,1,0)), u.x),
-      u.y
-    ),
-    mix(
-      mix(dot(hash3(i + vec3<f32>(0,0,1)), f - vec3<f32>(0,0,1)),
-          dot(hash3(i + vec3<f32>(1,0,1)), f - vec3<f32>(1,0,1)), u.x),
-      mix(dot(hash3(i + vec3<f32>(0,1,1)), f - vec3<f32>(0,1,1)),
-          dot(hash3(i + vec3<f32>(1,1,1)), f - vec3<f32>(1,1,1)), u.x),
-      u.y
-    ),
-    u.z
-  );
-}
-
-fn fbm(p: vec3<f32>) -> f32 {
-  var v = 0.0;
-  var a = 0.5;
-  var f = 1.0;
-  for (var i = 0; i < 4; i++) {
-    v += a * noise(p * f);
-    f *= 2.0;
-    a *= 0.5;
+  struct VertexOutput {
+    @builtin(position) position: vec4<f32>,
+    @location(0) worldPos: vec3<f32>,
+    @location(1) localPos: vec3<f32>,
   }
-  return v;
-}
 
-@fragment
-fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
-  let viewDir = normalize(uniforms.cameraPos - input.worldPos);
-  let n = normalize(input.normal);
-  let dist = length(input.localPos);
+  @vertex
+  fn vs_main(@location(0) pos: vec3<f32>) -> VertexOutput {
+    var out: VertexOutput;
+    
+    // Scale and position the sphere
+    let worldPos = pos * uniforms.sunSize + uniforms.sunWorldPos;
+    
+    out.worldPos = worldPos;
+    out.localPos = pos;  // Keep original sphere coordinates (-1 to 1)
+    out.position = uniforms.mvp * vec4<f32>(worldPos, 1.0);
+    
+    return out;
+  }
 
-  // Limb darkening
-  let centerDot = max(dot(n, viewDir), 0.0);
-  let limb = 0.4 + 0.6 * pow(centerDot, 0.7);
-
-  // Surface turbulence
-  let surfaceNoise = fbm(input.localPos * 6.0 + uniforms.time * 0.02);
-  let granulation = 0.9 + surfaceNoise * 0.15;
-
-  // Photosphere
-  let photosphere = vec3<f32>(1.0, 0.98, 0.92)
-                    * limb * granulation * 12.0;
-
-  // Chromosphere (reddish edge)
-  let edge = pow(1.0 - centerDot, 3.0);
-  let chromo = vec3<f32>(1.0, 0.4, 0.2) * edge * 2.0;
-
-  // Corona
-  let coronaDist = max(0.0, dist - 0.95);
-  let corona =
-      exp(-coronaDist * 2.0) * vec3<f32>(1.0, 0.7, 0.4) +
-      exp(-coronaDist * 5.0) * vec3<f32>(1.0, 0.9, 0.7);
-
-  var color = photosphere + chromo + corona * 6.0;
-
-  // Core glow
-  let core = smoothstep(0.3, 0.0, dist) * centerDot;
-  color += vec3<f32>(1.0, 1.0, 0.98) * core * 15.0;
-
-  return vec4<f32>(color, 1.0);
-}
-`;
-
+  @fragment
+  fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
+    let viewDir = normalize(uniforms.cameraPos - input.worldPos);
+    let dist = length(input.localPos);  // Distance from sphere center (0 to 1)
+    
+    // Multiple layers of glow creating volumetric effect
+    let core = exp(-dist * 3.0) * 4.0;
+    let innerGlow = exp(-dist * 1.8) * 2.0;
+    let middleGlow = exp(-dist * 1.0) * 1.2;
+    let outerGlow = exp(-dist * 0.5) * 0.6;
+    
+    let totalGlow = core + innerGlow + middleGlow + outerGlow;
+    
+    // Warm sun color with slight variation
+    let sunColor = vec3<f32>(1.0, 0.95, 0.85);
+    
+    return vec4<f32>(sunColor * totalGlow, 1.0);
+  }
+  `;
 
   const sunShaderModule = device.createShaderModule({ code: sunShaderCode });
 
@@ -512,8 +437,7 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
       module: sunShaderModule,
       entryPoint: "vs_main",
       buffers: [
-        { arrayStride: 3 * 4, attributes: [{ shaderLocation: 0, offset: 0, format: "float32x3" }] },
-        { arrayStride: 2 * 4, attributes: [{ shaderLocation: 1, offset: 0, format: "float32x2" }] },
+        { arrayStride: 3 * 4, attributes: [{ shaderLocation: 0, offset: 0, format: "float32x3" }] }
       ],
     },
     fragment: {
@@ -527,241 +451,16 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
         },
       }],
     },
-    primitive: { topology: "triangle-list", cullMode: "none" }, // No culling for glow
+    primitive: { topology: "triangle-list", cullMode: "none" },
     depthStencil: { 
-      depthWriteEnabled: true, 
-      depthCompare: "less", 
+      depthWriteEnabled: false,
+      depthCompare: "less-equal", 
       format: "depth24plus" 
     },
   });
 
   // =================================================================
-  // 5. LENS FLARE (NEW!)
-  // =================================================================
-
-  // Create a fullscreen quad for lens flare
-  const flareQuadVertices = new Float32Array([
-    -1, -1,  0, 0,  // Bottom-left
-     1, -1,  1, 0,  // Bottom-right
-    -1,  1,  0, 1,  // Top-left
-     1,  1,  1, 1   // Top-right
-  ]);
-
-  const flareQuadBuffer = device.createBuffer({
-    size: flareQuadVertices.byteLength,
-    usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST
-  });
-  device.queue.writeBuffer(flareQuadBuffer, 0, flareQuadVertices);
-
-  const flareUniformBuffer = device.createBuffer({
-    size: 32, // sunScreenPos (2), intensity (1), aspect (1), padding
-    usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
-  });
-
-  const flareBindGroupLayout = device.createBindGroupLayout({
-    entries: [
-      { binding: 0, visibility: GPUShaderStage.FRAGMENT, buffer: { type: "uniform" } }
-    ],
-  });
-
-  const flareBindGroup = device.createBindGroup({
-    layout: flareBindGroupLayout,
-    entries: [
-      { binding: 0, resource: { buffer: flareUniformBuffer } }
-    ],
-  });
-
-  const depthSampler = device.createSampler({
-    compare: "less",
-  });
-
-
-  const flareShaderCode = `
-  struct FlareUniforms {
-    sunScreenPos: vec2<f32>,
-    intensity: f32,
-    aspect: f32,
-  };
-
-  @group(0) @binding(0) var<uniform> uniforms: FlareUniforms;
-
-  struct VertexOutput {
-    @builtin(position) position: vec4<f32>,
-    @location(0) uv: vec2<f32>,
-  }
-
-  @vertex
-  fn vs_main(@location(0) pos: vec2<f32>, @location(1) uv: vec2<f32>) -> VertexOutput {
-    var output: VertexOutput;
-    output.position = vec4<f32>(pos, 0.0, 1.0);
-    output.uv = uv;
-    return output;
-  }
-
-  // Helper function for circular flares
-  fn drawCircle(uv: vec2<f32>, center: vec2<f32>, radius: f32, softness: f32) -> f32 {
-    let dist = length(uv - center);
-    return smoothstep(radius, radius - softness, dist);
-  }
-
-  // Hexagonal flare (lens aperture shape)
-  fn drawHexagon(uv: vec2<f32>, center: vec2<f32>, size: f32) -> f32 {
-    let p = (uv - center) / size;
-    let angle = atan2(p.y, p.x);
-    let dist = length(p);
-    let hexDist = cos(floor(0.5 + angle / 1.0472) * 1.0472 - angle) * dist;
-    return smoothstep(1.2, 0.8, hexDist);
-  }
-
-  // Chromatic aberration effect
-  fn chromaticFlare(uv: vec2<f32>, center: vec2<f32>, radius: f32, softness: f32) -> vec3<f32> {
-    let offset = (uv - center) * 0.015;
-    let r = drawCircle(uv + offset, center, radius, softness);
-    let g = drawCircle(uv, center, radius, softness);
-    let b = drawCircle(uv - offset, center, radius, softness);
-    return vec3<f32>(r, g, b);
-  }
-
-  @fragment
-  fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
-    let uv = input.uv;
-    let sunPos = uniforms.sunScreenPos;
-    let intensity = uniforms.intensity;
-    
-    // Adjust UV for aspect ratio
-    var adjustedUV = uv;
-    adjustedUV.x = (uv.x - 0.5) * uniforms.aspect + 0.5;
-    
-    var adjustedSunPos = sunPos;
-    adjustedSunPos.x = (sunPos.x - 0.5) * uniforms.aspect + 0.5;
-    
-    // Vector from screen center to sun
-    let toSun = adjustedSunPos - vec2<f32>(0.5, 0.5);
-    let center = vec2<f32>(0.5, 0.5);
-    
-    var flare = vec3<f32>(0.0);
-    
-    // Only render if sun is on screen and intensity is high
-    if (intensity > 0.1) {
-      // Main sun glow with chromatic aberration
-      flare += chromaticFlare(adjustedUV, adjustedSunPos, 0.15, 0.15) * intensity * 2.5;
-      
-      // Bright core bloom
-      flare += vec3<f32>(drawCircle(adjustedUV, adjustedSunPos, 0.08, 0.08)) * intensity * 4.0;
-      
-      // Hexagonal aperture flare (star burst)
-      flare += vec3<f32>(drawHexagon(adjustedUV, adjustedSunPos, 0.12)) * intensity * 1.5;
-      
-      // Secondary lens flares along the center-sun axis
-      let flareAxis = -toSun; // Opposite direction from sun
-      
-      // Multiple ghost flares at different distances
-      let ghost1Pos = center + flareAxis * 0.3;
-      flare += chromaticFlare(adjustedUV, ghost1Pos, 0.04, 0.04) * intensity * 0.6;
-      
-      let ghost2Pos = center + flareAxis * 0.5;
-      flare += vec3<f32>(drawCircle(adjustedUV, ghost2Pos, 0.06, 0.06)) * 
-              vec3<f32>(0.5, 0.7, 1.0) * intensity * 0.5;
-      
-      let ghost3Pos = center + flareAxis * 0.7;
-      flare += vec3<f32>(drawCircle(adjustedUV, ghost3Pos, 0.03, 0.03)) * 
-              vec3<f32>(1.0, 0.8, 0.5) * intensity * 0.4;
-      
-      let ghost4Pos = center + flareAxis * 0.9;
-      flare += chromaticFlare(adjustedUV, ghost4Pos, 0.05, 0.05) * intensity * 0.3;
-      
-      let ghost5Pos = center + flareAxis * 1.1;
-      flare += vec3<f32>(drawCircle(adjustedUV, ghost5Pos, 0.07, 0.07)) * 
-              vec3<f32>(0.8, 0.6, 1.0) * intensity * 0.35;
-      
-      // Horizontal lens flare streak
-      let streakDist = abs(adjustedUV.y - adjustedSunPos.y);
-      let streakH = smoothstep(0.003, 0.0, streakDist) * intensity * 0.4;
-      flare += vec3<f32>(streakH);
-      
-      // Vertical lens flare streak  
-      let streakDistV = abs(adjustedUV.x - adjustedSunPos.x);
-      let streakV = smoothstep(0.003, 0.0, streakDistV) * intensity * 0.4;
-      flare += vec3<f32>(streakV);
-      
-      // Diagonal streaks (X pattern)
-      let diagDist1 = abs((adjustedUV.x - adjustedSunPos.x) - (adjustedUV.y - adjustedSunPos.y));
-      let diagDist2 = abs((adjustedUV.x - adjustedSunPos.x) + (adjustedUV.y - adjustedSunPos.y));
-      let diag1 = smoothstep(0.002, 0.0, diagDist1) * intensity * 0.25;
-      let diag2 = smoothstep(0.002, 0.0, diagDist2) * intensity * 0.25;
-      flare += vec3<f32>(diag1 + diag2);
-      
-      // Screen-wide glow falloff
-      let distFromSun = length(adjustedUV - adjustedSunPos);
-      let screenGlow = exp(-distFromSun * 3.0) * intensity * 0.3;
-      flare += vec3<f32>(1.0, 0.95, 0.8) * screenGlow;
-    }
-    
-    return vec4<f32>(flare, 1.0);
-  }
-  `;
-
-  const flareShaderModule = device.createShaderModule({ code: flareShaderCode });
-
-  const flarePipeline = device.createRenderPipeline({
-    layout: device.createPipelineLayout({ bindGroupLayouts: [flareBindGroupLayout] }),
-    vertex: {
-      module: flareShaderModule,
-      entryPoint: "vs_main",
-      buffers: [
-        { 
-          arrayStride: 4 * 4, // 4 floats per vertex (x, y, u, v)
-          attributes: [
-            { shaderLocation: 0, offset: 0, format: "float32x2" },  // position
-            { shaderLocation: 1, offset: 8, format: "float32x2" }   // uv
-          ]
-        }
-      ],
-    },
-    fragment: {
-      module: flareShaderModule,
-      entryPoint: "fs_main",
-      targets: [{
-        format,
-        blend: {
-          color: { srcFactor: "one", dstFactor: "one", operation: "add" },
-          alpha: { srcFactor: "one", dstFactor: "one", operation: "add" },
-        },
-      }],
-    },
-    primitive: { topology: "triangle-strip" },
-    depthStencil: {
-      depthWriteEnabled: false,
-      depthCompare: "always",
-      format: "depth24plus"
-    },
-  });
-
-  // Helper function to project 3D world position to screen space
-  function projectToScreen(worldPos: number[], mvpMatrix: Float32Array, width: number, height: number): { x: number, y: number, visible: boolean } {
-    // Apply MVP transformation
-    const x = worldPos[0] * mvpMatrix[0] + worldPos[1] * mvpMatrix[4] + worldPos[2] * mvpMatrix[8] + mvpMatrix[12];
-    const y = worldPos[0] * mvpMatrix[1] + worldPos[1] * mvpMatrix[5] + worldPos[2] * mvpMatrix[9] + mvpMatrix[13];
-    const z = worldPos[0] * mvpMatrix[2] + worldPos[1] * mvpMatrix[6] + worldPos[2] * mvpMatrix[10] + mvpMatrix[14];
-    const w = worldPos[0] * mvpMatrix[3] + worldPos[1] * mvpMatrix[7] + worldPos[2] * mvpMatrix[11] + mvpMatrix[15];
-    
-    // Perspective divide
-    const ndcX = x / w;
-    const ndcY = y / w;
-    const ndcZ = z / w;
-    
-    // Convert to screen coordinates (0 to 1)
-    const screenX = (ndcX + 1.0) * 0.5;
-    const screenY = (1.0 - ndcY) * 0.5; // Flip Y
-    
-    // Check if behind camera or outside clip space
-    const visible = w > 0 && ndcZ > -1.0 && ndcZ < 1.0;
-    
-    return { x: screenX, y: screenY, visible };
-  }
-
-  // =================================================================
-  // 6. TIME DISPLAY
+  // 5. TIME DISPLAY
   // =================================================================
 
   const createTimeDisplay = () => {
@@ -792,7 +491,7 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
   createTimeDisplay();
 
   // =================================================================
-  // 7. SUN POSITION CALCULATION
+  // 6. SUN POSITION CALCULATION
   // =================================================================
 
   function calculateSunPosition(date: Date): { lat: number; lon: number; x: number; y: number; z: number } {
@@ -814,7 +513,7 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
   }
 
   // =================================================================
-  // 8. EARTH
+  // 7. EARTH WITH ENHANCED LIGHTING
   // =================================================================
 
   const { positions, uvs, indices } = createSphere(1.0, 60, 60);
@@ -909,7 +608,11 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
   @group(0) @binding(2) var textureSampler: sampler;
   @group(0) @binding(3) var cloudTexture: texture_2d<f32>;
 
-  struct VertexOutput { @builtin(position) position: vec4<f32>, @location(0) worldPos: vec3<f32>, @location(1) uv: vec2<f32> }
+  struct VertexOutput { 
+    @builtin(position) position: vec4<f32>, 
+    @location(0) worldPos: vec3<f32>, 
+    @location(1) uv: vec2<f32> 
+  }
 
   @vertex
   fn vs_main(@location(0) position: vec3<f32>, @location(1) uv: vec2<f32>) -> VertexOutput {
@@ -927,27 +630,59 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     let normal = normalize(input.worldPos);
     let sunDir = normalize(uniforms.sunDir);
     let viewDir = normalize(uniforms.cameraPos - input.worldPos);
+    
+    // Main sun lighting
     let sunDot = dot(normal, sunDir);
-    let terminatorWidth = 0.18;
+    let terminatorWidth = 0.12;
     let daylight = smoothstep(-terminatorWidth, terminatorWidth, sunDot);
+    
+    // Enhanced terminator glow
+    let terminatorGlow = exp(-abs(sunDot) * 8.0) * 0.3;
+    let glowColor = vec3<f32>(1.0, 0.7, 0.4) * terminatorGlow;
+    
+    // Atmospheric scattering
     let atmosphere = max(0.0, dot(normal, viewDir));
-    let atmosphereGlow = pow(atmosphere, 5.0) * 0.12;
+    let atmosphereGlow = pow(atmosphere, 5.0) * 0.15;
+    
+    // Rim lighting (sun edge glow)
     let rim = 1.0 - max(0.0, dot(viewDir, normal));
-    let rimGlow = pow(rim, 5.0) * 0.2 * max(0.0, sunDot + 0.15);
+    let sunAlignment = max(0.0, sunDot);
+    let rimGlow = pow(rim, 3.0) * 0.4 * sunAlignment;
+    
+    // Night side
     let nightSide = 1.0 - daylight;
-    let cityLights = nightSide * 0.25 * (texColor.r * 0.3 + texColor.g * 0.4 + texColor.b * 0.3);
-    let visibleCityLights = cityLights * (1.0 - cloudColor.a * 0.5 * uniforms.cloudOpacity);
+    let cityLights = nightSide * 0.3 * (texColor.r * 0.3 + texColor.g * 0.4 + texColor.b * 0.3);
+    let visibleCityLights = cityLights * (1.0 - cloudColor.a * 0.6 * uniforms.cloudOpacity);
+    
+    // Specular highlight (ocean reflection)
     let halfVec = normalize(sunDir + viewDir);
-    let specular = pow(max(0.0, dot(normal, halfVec)), 80.0) * 0.25 * daylight * (1.0 - cloudColor.a * 0.6 * uniforms.cloudOpacity);
-    let ambient = 0.25;
-    let earthDiffuse = ambient + (1.0 - ambient) * daylight * 0.75;
+    let specular = pow(max(0.0, dot(normal, halfVec)), 120.0) * 0.4 * daylight;
+    let oceanSpecular = specular * (1.0 - cloudColor.a * 0.8 * uniforms.cloudOpacity);
+    
+    // Ambient and diffuse lighting
+    let ambient = 0.15;
+    let earthDiffuse = ambient + (1.0 - ambient) * daylight * 1.2;
+    
+    // Combine earth colors
     var earthColor = texColor.rgb * earthDiffuse;
     earthColor += vec3<f32>(1.0, 0.85, 0.5) * visibleCityLights;
-    earthColor += vec3<f32>(0.85, 0.9, 1.0) * specular;
-    let dynamicCloudAlpha = cloudColor.a * uniforms.cloudOpacity * 0.5;
-    var finalColor = mix(earthColor, vec3<f32>(0.92), dynamicCloudAlpha);
-    finalColor += vec3<f32>(0.25, 0.4, 0.7) * atmosphereGlow;
-    finalColor += vec3<f32>(0.35, 0.5, 0.8) * rimGlow;
+    earthColor += vec3<f32>(1.0, 1.0, 0.95) * oceanSpecular;
+    earthColor += glowColor;
+    
+    // Cloud shadows on day side and glow on night side
+    let cloudShadow = 1.0 - (cloudColor.a * 0.3 * daylight * uniforms.cloudOpacity);
+    earthColor *= cloudShadow;
+    
+    // Cloud lighting
+    let cloudDiffuse = ambient + (1.0 - ambient) * daylight * 0.95;
+    let dynamicCloudAlpha = cloudColor.a * uniforms.cloudOpacity * 0.6;
+    
+    var finalColor = mix(earthColor, vec3<f32>(0.95) * cloudDiffuse, dynamicCloudAlpha);
+    
+    // Atmospheric effects
+    finalColor += vec3<f32>(0.3, 0.5, 0.8) * atmosphereGlow;
+    finalColor += vec3<f32>(1.0, 0.8, 0.5) * rimGlow;
+    
     return vec4<f32>(finalColor, 1.0);
   }
   `;
@@ -970,7 +705,7 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
   });
 
   // =================================================================
-  // 9. RENDER LOOP
+  // 8. RENDER LOOP
   // =================================================================
   let depthTexture: GPUTexture;
   function resize() {
@@ -1085,20 +820,24 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     if (!depthTexture) { requestAnimationFrame(frame); return; }
     const timeSinceInteraction = Date.now() - lastInteractionTime;
     if (timeSinceInteraction > autoRotateDelay && !isDragging && !isPinching) { rotationY += autoRotateSpeed; }
+    
     const now = new Date();
     const sunPos = calculateSunPosition(now);
     updateTimeDisplay(now, sunPos.lat, sunPos.lon);
     const mvpMatrix = getMVPMatrix();
-    const camX = 0;
-    const camY = 0;
-    const camZ = cameraDistance;
+    
+    // Calculate camera position
+    const camWorldX = Math.sin(rotationY) * Math.cos(rotationX) * cameraDistance;
+    const camWorldY = -Math.sin(rotationX) * cameraDistance;
+    const camWorldZ = Math.cos(rotationY) * Math.cos(rotationX) * cameraDistance;
+    
     const cloudOpacity = Math.min(1.0, Math.max(0.0, (cameraDistance - 1.5) / 2.0));
     
     // Update Earth Uniforms
     const uniformData = new Float32Array(28);
     uniformData.set(mvpMatrix, 0);
     uniformData.set([sunPos.x, sunPos.y, sunPos.z], 16);
-    uniformData.set([camX, camY, camZ], 20);
+    uniformData.set([camWorldX, camWorldY, camWorldZ], 20);
     uniformData[24] = cloudOpacity;
     device.queue.writeBuffer(uniformBuffer, 0, uniformData);
 
@@ -1108,27 +847,20 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     // Update Starfield Uniforms
     device.queue.writeBuffer(starfieldUniformBuffer, 0, mvpMatrix);
 
-    // Update Sun Uniforms - Distant bright light source
-    const sunDistance = 80.0; // Far away for distant sun effect
-    const sunScale = 1.6; // Larger, more visible
+    // Update Sun Uniforms
+    const sunDistance = 50.0;
+    const sunSize = 3.5;  // Size of glowing sphere
     const sunWorldPos = [
       sunPos.x * sunDistance,
       sunPos.y * sunDistance,
       sunPos.z * sunDistance
     ];
     
-    // Calculate camera position in world space
-    const camWorldX = Math.sin(rotationY) * Math.cos(rotationX) * cameraDistance;
-    const camWorldY = -Math.sin(rotationX) * cameraDistance;
-    const camWorldZ = Math.cos(rotationY) * Math.cos(rotationX) * cameraDistance;
-    
     const sunUniformData = new Float32Array(24);
-    sunUniformData.set(mvpMatrix, 0);        // MVP matrix (16 floats)
-    sunUniformData.set(sunWorldPos, 16);     // Sun position (3 floats)
-    sunUniformData[19] = sunScale;           // Sun scale (1 float)
+    sunUniformData.set(mvpMatrix, 0);
+    sunUniformData.set(sunWorldPos, 16);
+    sunUniformData[19] = sunSize;
     sunUniformData.set([camWorldX, camWorldY, camWorldZ], 20);
-    sunUniformData[23] = performance.now() * 0.001;
-    // Camera position (3 floats)
     device.queue.writeBuffer(sunUniformBuffer, 0, sunUniformData);
 
     const commandEncoder = device.createCommandEncoder();
@@ -1153,11 +885,10 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     renderPass.setVertexBuffer(1, starColorBuffer);
     renderPass.draw(starfield.count);
 
-    // 3. Draw Sun (NEW! - Before Earth so Earth can occlude it)
+    // 3. Draw Sun Glow (3D Sphere)
     renderPass.setPipeline(sunPipeline);
     renderPass.setBindGroup(0, sunBindGroup);
     renderPass.setVertexBuffer(0, sunPositionBuffer);
-    renderPass.setVertexBuffer(1, sunUvBuffer);
     renderPass.setIndexBuffer(sunIndexBuffer, "uint32");
     renderPass.drawIndexed(sunGeo.indices.length);
 
@@ -1168,48 +899,6 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     renderPass.setVertexBuffer(1, uvBuffer);
     renderPass.setIndexBuffer(indexBuffer, "uint32");
     renderPass.drawIndexed(indices.length);
-
-    // 5. Draw Lens Flare (NEW! - After Earth for proper overlay)
-    const sunScreenPos = projectToScreen(sunWorldPos, mvpMatrix, canvas.width, canvas.height);
-    
-    // Calculate flare intensity based on sun visibility and viewing angle
-    let flareIntensity = 0.0;
-    if (sunScreenPos.visible) {
-      // Check if sun is roughly on screen (with margin for flare effects)
-      if (sunScreenPos.x > -0.3 && sunScreenPos.x < 1.3 && 
-          sunScreenPos.y > -0.3 && sunScreenPos.y < 1.3) {
-        
-        // Calculate view direction to sun
-        const sunDir = [sunPos.x, sunPos.y, sunPos.z];
-        const viewDir = [
-          Math.sin(rotationY) * Math.cos(rotationX),
-          -Math.sin(rotationX),
-          Math.cos(rotationY) * Math.cos(rotationX)
-        ];
-        
-        // Dot product for alignment
-        const dot = sunDir[0] * viewDir[0] + sunDir[1] * viewDir[1] + sunDir[2] * viewDir[2];
-        
-        // Intensity increases when looking toward sun (dot > 0)
-        flareIntensity = Math.max(0, dot);
-        flareIntensity = Math.pow(flareIntensity, 0.5); // Soften falloff
-      }
-    }
-    
-    // Update flare uniforms
-    const aspect = canvas.width / canvas.height;
-    const flareUniformData = new Float32Array([
-      sunScreenPos.x, sunScreenPos.y,  // Sun screen position
-      flareIntensity,                   // Intensity
-      aspect                             // Aspect ratio
-    ]);
-    device.queue.writeBuffer(flareUniformBuffer, 0, flareUniformData);
-    
-    // Render lens flare as fullscreen effect
-    renderPass.setPipeline(flarePipeline);
-    renderPass.setBindGroup(0, flareBindGroup);
-    renderPass.setVertexBuffer(0, flareQuadBuffer);
-    renderPass.draw(4);
 
     renderPass.end();
     device.queue.submit([commandEncoder.finish()]);
